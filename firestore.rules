@@ -1,0 +1,126 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: users
+    // Fields: uid, name, email, role, departmentId, photoURL, position
+    //
+    // Collection: departments
+    // Fields: id, name, type, parentId
+    //
+    // Collection: goalIndicators
+    // Fields: id, code, name, description
+    //
+    // Collection: memberGoals
+    // Fields: id, userId, year, status, narrative, indicatorIds
+    //
+    // Collection: performanceEvents
+    // Fields: id, userId, date, title, description, indicatorId, achievement, status
+    //
+    // Collection: comments
+    // Fields: id, targetId, userId, content, createdAt
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "withGossing@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isLeader() {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['leader', 'head', 'admin'];
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Validators
+    // ===============================================================
+    function isValidUser(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.email is string && data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$") &&
+             data.role in ['member', 'leader', 'head', 'admin'] &&
+             data.departmentId is string;
+    }
+
+    function isValidGoal(data) {
+      return data.userId is string &&
+             data.year is number &&
+             data.status in ['draft', 'pending', 'agreed'] &&
+             (data.narrative is string || !('narrative' in data)) &&
+             (data.indicatorIds is list || !('indicatorIds' in data));
+    }
+
+    function isValidEvent(data) {
+      return data.userId is string &&
+             data.date is string &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.indicatorId is string &&
+             (data.achievement is number || !('achievement' in data)) &&
+             data.status in ['registered', 'reviewed'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isOwner(userId) && isValidUser(request.resource.data) || isAdmin();
+    }
+
+    match /departments/{deptId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /goalIndicators/{indicatorId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /memberGoals/{goalId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidGoal(request.resource.data) && (isOwner(request.resource.data.userId) || isAdmin());
+      allow update: if isAuthenticated() && isValidGoal(request.resource.data) && (isOwner(resource.data.userId) || isLeader() || isAdmin());
+    }
+
+    match /teamGoals/{goalId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isLeader() && (request.resource.data.departmentId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.departmentId || isAdmin());
+    }
+
+    match /performanceEvents/{eventId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidEvent(request.resource.data) && (isOwner(request.resource.data.userId) || isAdmin());
+      allow update: if isAuthenticated() && isValidEvent(request.resource.data) && (isOwner(resource.data.userId) || isLeader() || isAdmin());
+      allow delete: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+    }
+
+    match /comments/{commentId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && hasRequiredFields(['targetId', 'userId', 'content', 'createdAt']) && isOwner(request.resource.data.userId);
+      allow delete: if isAuthenticated() && (isOwner(resource.data.userId) || isAdmin());
+    }
+  }
+}

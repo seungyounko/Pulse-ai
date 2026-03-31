@@ -1,0 +1,130 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Employee information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["member", "leader", "head", "admin"] },
+        "departmentId": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "position": { "type": "string" }
+      },
+      "required": ["uid", "name", "email", "role", "departmentId"]
+    },
+    "Department": {
+      "title": "Department",
+      "description": "Department hierarchy",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string", "enum": ["HQ", "Team", "Area"] },
+        "parentId": { "type": "string" }
+      },
+      "required": ["id", "name", "type"]
+    },
+    "GoalIndicator": {
+      "title": "Goal Indicator",
+      "description": "Coded list of performance indicators",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "required": ["id", "code", "name"]
+    },
+    "MemberGoal": {
+      "title": "Member Goal",
+      "description": "Annual goals for a team member",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "year": { "type": "number" },
+        "status": { "type": "string", "enum": ["draft", "pending", "agreed"] },
+        "narrative": { "type": "string" },
+        "indicatorIds": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["id", "userId", "year", "status"]
+    },
+    "PerformanceEvent": {
+      "title": "Performance Event",
+      "description": "Individual performance events registered by members",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "indicatorId": { "type": "string" },
+        "achievement": { "type": "number" },
+        "status": { "type": "string", "enum": ["registered", "reviewed"] }
+      },
+      "required": ["id", "userId", "date", "title", "indicatorId"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "Feedback and opinions on goals or events",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "targetId": { "type": "string" },
+        "userId": { "type": "string" },
+        "content": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "targetId", "userId", "content", "createdAt"]
+    },
+    "TeamGoal": {
+      "title": "Team Goal",
+      "description": "Annual goals for a team or department",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "year": { "type": "number" },
+        "narrative": { "type": "string" },
+        "indicatorIds": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["draft", "published"] }
+      },
+      "required": ["id", "departmentId", "year", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/departments/{deptId}": {
+      "schema": "Department",
+      "description": "Department definitions"
+    },
+    "/goalIndicators/{indicatorId}": {
+      "schema": "GoalIndicator",
+      "description": "Standardized goal indicators"
+    },
+    "/memberGoals/{goalId}": {
+      "schema": "MemberGoal",
+      "description": "Team member annual goals"
+    },
+    "/teamGoals/{goalId}": {
+      "schema": "TeamGoal",
+      "description": "Team or department annual goals"
+    },
+    "/performanceEvents/{eventId}": {
+      "schema": "PerformanceEvent",
+      "description": "Performance event logs"
+    },
+    "/comments/{commentId}": {
+      "schema": "Comment",
+      "description": "Feedback comments"
+    }
+  }
+}
