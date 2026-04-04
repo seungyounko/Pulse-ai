@@ -73,6 +73,28 @@ export interface TeamGoal {
 }
 
 export type EventStatus = 'registered' | 'reviewed';
+export type ProgressStatus = 'plan' | 'in-progress' | 'completed';
+
+export interface EventHistory {
+  id: string;
+  date: string;
+  userId: string;
+  action: string;
+  changes?: {
+    field: string;
+    oldValue: any;
+    newValue: any;
+  }[];
+}
+
+export interface EventComment {
+  id: string;
+  userId: string;
+  userName: string;
+  userRole: string;
+  content: string;
+  createdAt: string;
+}
 
 export interface PerformanceEvent {
   id: string;
@@ -83,8 +105,12 @@ export interface PerformanceEvent {
   workGroupId?: string;
   description?: string;
   indicatorId?: string;
+  category?: GoalCategory;
   achievement: number; // 0 to 100
   status: EventStatus;
+  progressStatus?: ProgressStatus;
+  history?: EventHistory[];
+  comments?: EventComment[];
 }
 
 export interface Comment {

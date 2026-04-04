@@ -36,13 +36,15 @@ import {
   Briefcase,
   Flag,
   Trash2,
+  Edit2,
   ChevronRight,
   X,
   Calendar,
   AlertTriangle,
   TrendingDown,
   MessageSquare,
-  FileText
+  FileText,
+  Database
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -80,7 +82,11 @@ import {
   TeamIndicator,
   GoalCategory,
   TeamGoalStatus,
-  MeetingComment
+  MeetingComment,
+  EventStatus,
+  ProgressStatus,
+  EventHistory,
+  EventComment
 } from './types';
 
 // --- Error Handling ---
@@ -175,7 +181,7 @@ export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'goals' | 'team-goals' | 'events' | 'team-events' | 'meeting' | 'admin'>('dashboard');
 
   useEffect(() => {
     if (profile?.role === 'member' && activeTab === 'dashboard') {
@@ -702,9 +708,12 @@ export default function App() {
             )}
             <SidebarItem icon={Flag} label="팀 목표" active={activeTab === 'team-goals'} onClick={() => setActiveTab('team-goals')} />
             <SidebarItem icon={Target} label="나의 목표" active={activeTab === 'goals'} onClick={() => setActiveTab('goals')} />
+            {(profile?.role === 'leader' || profile?.role === 'admin') && (
+              <SidebarItem icon={Database} label="팀 기록실" active={activeTab === 'team-events'} onClick={() => setActiveTab('team-events')} />
+            )}
             <SidebarItem icon={Trophy} label="나의 기록실" active={activeTab === 'events'} onClick={() => setActiveTab('events')} />
             {(profile?.role === 'leader' || profile?.role === 'admin') && (
-              <SidebarItem icon={MessageSquare} label="팀원 미팅" active={activeTab === 'meeting'} onClick={() => setActiveTab('meeting')} />
+              <SidebarItem icon={MessageSquare} label="팀원 관리" active={activeTab === 'meeting'} onClick={() => setActiveTab('meeting')} />
             )}
             {(profile?.role === 'admin' || profile?.email === 'withGossing@gmail.com') && (
               <SidebarItem icon={Settings} label="관리자" active={activeTab === 'admin'} onClick={() => setActiveTab('admin')} />
@@ -728,7 +737,7 @@ export default function App() {
 
         <main className="flex-1 p-10 overflow-auto">
           <AnimatePresence mode="wait">
-            {activeTab === 'dashboard' && <DashboardView key="dashboard" profile={profile!} events={events} users={users} teamGoals={teamGoals} indicators={indicators} departments={departments} />}
+            {activeTab === 'dashboard' && <DashboardView key="dashboard" profile={profile!} events={events} users={users} teamGoals={teamGoals} indicators={indicators} departments={departments} myGoals={myGoals} />}
             {activeTab === 'team-goals' && (
               <TeamGoalsView 
                 key="team-goals" 
@@ -766,6 +775,19 @@ export default function App() {
                 departments={departments} 
                 teamGoals={teamGoals} 
                 myGoals={myGoals}
+                isMockMode={isMockMode}
+                setEvents={setEvents}
+              />
+            )}
+            {activeTab === 'team-events' && (
+              <TeamRecordsView 
+                key="team-events"
+                profile={profile!} 
+                events={events} 
+                indicators={indicators} 
+                users={users}
+                departments={departments}
+                teamGoals={teamGoals}
                 isMockMode={isMockMode}
                 setEvents={setEvents}
               />
@@ -817,9 +839,25 @@ const DashboardView: React.FC<{
   teamGoals: TeamGoal[];
   indicators: GoalIndicator[];
   departments: Department[];
-}> = ({ profile, events, users, teamGoals, indicators, departments }) => {
+  myGoals: MemberGoal[];
+}> = ({ profile, events, users, teamGoals, indicators, departments, myGoals }) => {
   const isLeader = profile.role === 'leader';
-  const myEvents = events.filter(e => e.userId === profile.uid);
+  const [showSettings, setShowSettings] = useState(false);
+  const [widgets, setWidgets] = useState([
+    { id: 'summary', title: '성과 요약', enabled: true, icon: <Trophy size={16} /> },
+    { id: 'monthly', title: '월별 추이', enabled: true, icon: <TrendingUp size={16} /> },
+    { id: 'category', title: '영역별 현황', enabled: true, icon: <Target size={16} /> },
+    { id: 'workgroup', title: '업무그룹별', enabled: true, icon: <Building2 size={16} />, leaderOnly: true },
+    { id: 'ranking', title: '팀원 랭킹', enabled: true, icon: <Users size={16} />, leaderOnly: true },
+    { id: 'recent', title: '최근 성과', enabled: true, icon: <CheckCircle2 size={16} /> },
+    { id: 'pending', title: '대기 업무', enabled: true, icon: <Clock size={16} /> },
+  ]);
+
+  const toggleWidget = (id: string) => {
+    setWidgets(prev => prev.map(w => w.id === id ? { ...w, enabled: !w.enabled } : w));
+  };
+
+  const myEvents = events.filter(e => e.userId === profile.uid && (profile.role !== 'member' || e.status === 'reviewed'));
   const avgAchievement = myEvents.length > 0 ? Math.round(myEvents.reduce((acc, curr) => acc + curr.achievement, 0) / myEvents.length) : 0;
 
   const activeDeptId = profile.workGroupId || profile.teamId;
@@ -950,10 +988,59 @@ const DashboardView: React.FC<{
     return data;
   }, [events, memberIds]);
 
+  const recentAchievements = useMemo(() => {
+    return events
+      .filter(e => e.status === 'reviewed' && memberIds.includes(e.userId) && e.achievement >= 80)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      .slice(0, 5);
+  }, [events, memberIds]);
+
+  const pendingTasks = useMemo(() => {
+    const tasks = [];
+    
+    // Events needing review (for leaders)
+    if (isLeader) {
+      const unreviewedEvents = events.filter(e => e.status === 'registered' && memberIds.includes(e.userId));
+      unreviewedEvents.forEach(e => {
+        const user = users.find(u => u.uid === e.userId);
+        tasks.push({
+          id: `task-event-${e.id}`,
+          type: 'review',
+          title: `성과 검토: ${user?.name} - ${e.title}`,
+          date: e.date,
+          priority: 'high'
+        });
+      });
+    }
+
+    // Goals needing agreement
+    const pendingGoals = myGoals.filter(g => g.status === 'pending' && (isLeader ? memberIds.includes(g.userId) : g.userId === profile.uid));
+    pendingGoals.forEach(g => {
+      const user = users.find(u => u.uid === g.userId);
+      tasks.push({
+        id: `task-goal-${g.id}`,
+        type: 'goal',
+        title: isLeader ? `목표 합의 대기: ${user?.name}` : `나의 목표 합의 대기`,
+        date: new Date().toISOString(),
+        priority: 'medium'
+      });
+    });
+
+    return tasks.sort((a, b) => (a.priority === 'high' ? -1 : 1));
+  }, [events, myGoals, isLeader, memberIds, users, profile.uid]);
+
   return (
     <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }} className="space-y-8">
       <header className="flex justify-between items-end">
-        <div>
+        <div className="flex items-center gap-4">
+          <h2 className="text-2xl font-black text-gray-900">Dashboard</h2>
+          <button 
+            onClick={() => setShowSettings(!showSettings)}
+            className="p-2 bg-white border border-gray-100 rounded-xl shadow-sm hover:bg-gray-50 transition-all text-gray-400 hover:text-blue-600"
+            title="대시보드 설정"
+          >
+            <Settings size={20} />
+          </button>
         </div>
         {isLeader && (
           <div className="bg-blue-50 px-4 py-2 rounded-2xl border border-blue-100 flex items-center gap-2">
@@ -963,37 +1050,76 @@ const DashboardView: React.FC<{
         )}
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm relative overflow-hidden group">
-          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-            <Trophy size={80} />
-          </div>
-          <Trophy className="text-blue-500 mb-4" size={24} />
-          <p className="text-gray-500 text-sm font-medium">{isLeader ? '팀 평균 달성도' : '나의 평균 달성도'}</p>
-          <div className="flex items-baseline gap-2">
-            <h3 className="text-4xl font-bold text-gray-900 mt-1">{isLeader ? teamAvgAchievement : avgAchievement}%</h3>
-            {isLeader && <span className="text-xs font-bold text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full">Team</span>}
-          </div>
-        </div>
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div 
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="bg-gray-900 text-white p-6 rounded-[2rem] overflow-hidden"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="font-bold">대시보드 위젯 설정</h4>
+              <button onClick={() => setShowSettings(false)} className="text-gray-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {widgets.map(w => {
+                if (w.leaderOnly && !isLeader) return null;
+                return (
+                  <button
+                    key={w.id}
+                    onClick={() => toggleWidget(w.id)}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all ${
+                      w.enabled 
+                        ? 'bg-blue-600 border-blue-500 text-white' 
+                        : 'bg-gray-800 border-gray-700 text-gray-400'
+                    }`}
+                  >
+                    {w.icon}
+                    <span className="text-sm font-bold">{w.title}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-        <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm relative overflow-hidden group">
-          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-            <Calendar size={80} />
+      {widgets.find(w => w.id === 'summary')?.enabled && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm relative overflow-hidden group">
+            <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+              <Trophy size={80} />
+            </div>
+            <Trophy className="text-blue-500 mb-4" size={24} />
+            <p className="text-gray-500 text-sm font-medium">{isLeader ? '팀 평균 달성도' : '나의 평균 달성도'}</p>
+            <div className="flex items-baseline gap-2">
+              <h3 className="text-4xl font-bold text-gray-900 mt-1">{isLeader ? teamAvgAchievement : avgAchievement}%</h3>
+              {isLeader && <span className="text-xs font-bold text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full">Team</span>}
+            </div>
           </div>
-          <CheckCircle2 className="text-emerald-500 mb-4" size={24} />
-          <p className="text-gray-500 text-sm font-medium">{isLeader ? '팀 전체 등록 건수 (올해)' : '등록된 이벤트'}</p>
-          <h3 className="text-4xl font-bold text-gray-900 mt-1">{isLeader ? eventStats.totalThisYear : myEvents.length}건</h3>
-        </div>
 
-        <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm relative overflow-hidden group">
-          <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-            <Target size={80} />
+          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm relative overflow-hidden group">
+            <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+              <Calendar size={80} />
+            </div>
+            <CheckCircle2 className="text-emerald-500 mb-4" size={24} />
+            <p className="text-gray-500 text-sm font-medium">{isLeader ? '팀 전체 등록 건수 (올해)' : '등록된 이벤트'}</p>
+            <h3 className="text-4xl font-bold text-gray-900 mt-1">{isLeader ? eventStats.totalThisYear : myEvents.length}건</h3>
           </div>
-          <Target className="text-amber-500 mb-4" size={24} />
-          <p className="text-gray-500 text-sm font-medium">{isLeader ? '최근 1주일 등록 건수' : '나의 목표 상태'}</p>
-          <h3 className="text-4xl font-bold text-gray-900 mt-1">{isLeader ? eventStats.recentCount : '진행 중'}</h3>
+
+          <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm relative overflow-hidden group">
+            <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+              <Target size={80} />
+            </div>
+            <Target className="text-amber-500 mb-4" size={24} />
+            <p className="text-gray-500 text-sm font-medium">{isLeader ? '최근 1주일 등록 건수' : '나의 목표 상태'}</p>
+            <h3 className="text-4xl font-bold text-gray-900 mt-1">{isLeader ? eventStats.recentCount : '진행 중'}</h3>
+          </div>
         </div>
-      </div>
+      )}
 
       {isLeader && eventStats.unassignedCount > 0 && (
         <div className="bg-amber-50 border border-amber-100 p-4 rounded-2xl flex items-center gap-3">
@@ -1006,65 +1132,69 @@ const DashboardView: React.FC<{
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <div className="space-y-8">
-          <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
-            <h4 className="text-lg font-bold text-gray-900 mb-6">{isLeader ? '팀 월별 달성도 추이' : '나의 월별 달성도 추이'}</h4>
-            <div className="h-64 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={monthlyAchievementData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                  <XAxis 
-                    dataKey="name" 
-                    axisLine={false} 
-                    tickLine={false} 
-                    tick={{ fontSize: 12, fill: '#9CA3AF', fontWeight: 600 }}
-                    dy={10}
-                  />
-                  <YAxis 
-                    axisLine={false} 
-                    tickLine={false} 
-                    tick={{ fontSize: 12, fill: '#9CA3AF', fontWeight: 600 }}
-                    domain={[0, 100]}
-                  />
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                    itemStyle={{ fontWeight: 700, color: '#3B82F6' }}
-                  />
-                  <Line 
-                    type="monotone" 
-                    dataKey="achievement" 
-                    stroke="#3B82F6" 
-                    strokeWidth={4} 
-                    dot={{ r: 6, fill: '#3B82F6', strokeWidth: 2, stroke: '#fff' }}
-                    activeDot={{ r: 8, strokeWidth: 0 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
-            <h4 className="text-lg font-bold text-gray-900 mb-6">{isLeader ? '팀 영역별 달성 비율' : '영역별 목표 달성 현황'}</h4>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-              {categoryAchievementData.map((data) => (
-                <div key={data.name} className="space-y-4">
-                  <div className="flex justify-between items-end">
-                    <span className="text-sm font-bold text-gray-500">{data.name}</span>
-                    <span className="text-2xl font-black text-gray-900">{data.achievement}%</span>
-                  </div>
-                  <div className="relative h-24 flex items-end justify-center bg-gray-50 rounded-2xl overflow-hidden p-2">
-                    <motion.div 
-                      initial={{ height: 0 }}
-                      animate={{ height: `${data.achievement}%` }}
-                      className="w-full rounded-xl shadow-lg"
-                      style={{ backgroundColor: data.color }}
+          {widgets.find(w => w.id === 'monthly')?.enabled && (
+            <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
+              <h4 className="text-lg font-bold text-gray-900 mb-6">{isLeader ? '팀 월별 달성도 추이' : '나의 월별 달성도 추이'}</h4>
+              <div className="h-64 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={monthlyAchievementData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                    <XAxis 
+                      dataKey="name" 
+                      axisLine={false} 
+                      tickLine={false} 
+                      tick={{ fontSize: 12, fill: '#9CA3AF', fontWeight: 600 }}
+                      dy={10}
                     />
-                  </div>
-                </div>
-              ))}
+                    <YAxis 
+                      axisLine={false} 
+                      tickLine={false} 
+                      tick={{ fontSize: 12, fill: '#9CA3AF', fontWeight: 600 }}
+                      domain={[0, 100]}
+                    />
+                    <Tooltip 
+                      contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                      itemStyle={{ fontWeight: 700, color: '#3B82F6' }}
+                    />
+                    <Line 
+                      type="monotone" 
+                      dataKey="achievement" 
+                      stroke="#3B82F6" 
+                      strokeWidth={4} 
+                      dot={{ r: 6, fill: '#3B82F6', strokeWidth: 2, stroke: '#fff' }}
+                      activeDot={{ r: 8, strokeWidth: 0 }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
             </div>
-          </div>
+          )}
 
-          {isLeader && workGroupAchievementData.length > 0 && (
+          {widgets.find(w => w.id === 'category')?.enabled && (
+            <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
+              <h4 className="text-lg font-bold text-gray-900 mb-6">{isLeader ? '팀 영역별 달성 비율' : '영역별 목표 달성 현황'}</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+                {categoryAchievementData.map((data) => (
+                  <div key={data.name} className="space-y-4">
+                    <div className="flex justify-between items-end">
+                      <span className="text-sm font-bold text-gray-500">{data.name}</span>
+                      <span className="text-2xl font-black text-gray-900">{data.achievement}%</span>
+                    </div>
+                    <div className="relative h-24 flex items-end justify-center bg-gray-50 rounded-2xl overflow-hidden p-2">
+                      <motion.div 
+                        initial={{ height: 0 }}
+                        animate={{ height: `${data.achievement}%` }}
+                        className="w-full rounded-xl shadow-lg"
+                        style={{ backgroundColor: data.color }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {isLeader && widgets.find(w => w.id === 'workgroup')?.enabled && workGroupAchievementData.length > 0 && (
             <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
               <h4 className="text-lg font-bold text-gray-900 mb-6">업무그룹별 달성율</h4>
               <div className="space-y-4">
@@ -1087,7 +1217,7 @@ const DashboardView: React.FC<{
             </div>
           )}
 
-          {isLeader && (
+          {isLeader && widgets.find(w => w.id === 'summary')?.enabled && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <div className="bg-emerald-50 p-6 rounded-3xl border border-emerald-100">
                 <div className="flex items-center gap-2 mb-4">
@@ -1110,15 +1240,64 @@ const DashboardView: React.FC<{
         </div>
 
         <div className="space-y-8">
-          {isLeader && (
+          {widgets.find(w => w.id === 'pending')?.enabled && pendingTasks.length > 0 && (
+            <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
+              <div className="flex items-center justify-between mb-6">
+                <h4 className="text-lg font-bold text-gray-900">대기 업무 ({pendingTasks.length})</h4>
+                <Clock className="text-amber-500" size={20} />
+              </div>
+              <div className="space-y-3">
+                {pendingTasks.map(task => (
+                  <div key={task.id} className="p-4 bg-gray-50 rounded-2xl border border-gray-100 flex items-center justify-between group hover:bg-white hover:shadow-md transition-all">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-2 h-2 rounded-full ${task.priority === 'high' ? 'bg-rose-500' : 'bg-amber-500'}`} />
+                      <div>
+                        <p className="text-sm font-bold text-gray-900">{task.title}</p>
+                        <p className="text-[10px] text-gray-400 font-medium">{new Date(task.date).toLocaleDateString()}</p>
+                      </div>
+                    </div>
+                    <ChevronRight size={16} className="text-gray-300 group-hover:text-blue-500 transition-colors" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {widgets.find(w => w.id === 'recent')?.enabled && recentAchievements.length > 0 && (
+            <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
+              <div className="flex items-center justify-between mb-6">
+                <h4 className="text-lg font-bold text-gray-900">최근 주요 성과</h4>
+                <Trophy className="text-blue-500" size={20} />
+              </div>
+              <div className="space-y-4">
+                {recentAchievements.map(event => {
+                  const user = users.find(u => u.uid === event.userId);
+                  return (
+                    <div key={event.id} className="flex gap-4">
+                      <img src={user?.photoURL} alt={user?.name} className="w-10 h-10 rounded-full border-2 border-white shadow-sm" referrerPolicy="no-referrer" />
+                      <div className="flex-1">
+                        <div className="flex justify-between items-start">
+                          <p className="text-sm font-bold text-gray-900">{event.title}</p>
+                          <span className="text-xs font-black text-blue-600">{event.achievement}%</span>
+                        </div>
+                        <p className="text-[10px] text-gray-400 font-medium">{user?.name} • {new Date(event.date).toLocaleDateString()}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {isLeader && widgets.find(w => w.id === 'ranking')?.enabled && (
             <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm">
               <h4 className="text-lg font-bold text-gray-900 mb-6">팀원별 성과 랭킹</h4>
               <div className="space-y-6">
                 <div className="flex items-center justify-between p-4 bg-blue-50 rounded-2xl border border-blue-100">
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white font-bold">TOP</div>
+                    <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center text-white font-bold text-xs">TOP</div>
                     <div>
-                      <p className="text-xs text-blue-600 font-bold">최고 달성 팀원</p>
+                      <p className="text-[10px] text-blue-600 font-bold uppercase tracking-wider">최고 달성 팀원</p>
                       <p className="text-lg font-black text-blue-900">{topMember?.name}</p>
                     </div>
                   </div>
@@ -1127,9 +1306,9 @@ const DashboardView: React.FC<{
                 
                 <div className="flex items-center justify-between p-4 bg-gray-50 rounded-2xl border border-gray-100">
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-gray-400 rounded-full flex items-center justify-center text-white font-bold">LOW</div>
+                    <div className="w-10 h-10 bg-gray-400 rounded-full flex items-center justify-center text-white font-bold text-xs">LOW</div>
                     <div>
-                      <p className="text-xs text-gray-500 font-bold">최저 달성 팀원</p>
+                      <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">최저 달성 팀원</p>
                       <p className="text-lg font-black text-gray-900">{bottomMember?.name}</p>
                     </div>
                   </div>
@@ -1333,7 +1512,7 @@ const MeetingView: React.FC<{
   }, [selectedMember, events]);
 
   const filteredMembers = useMemo(() => {
-    if (!searchTerm.trim()) return [];
+    if (!searchTerm.trim()) return teamMembers;
     return teamMembers.filter(m => m.name.toLowerCase().includes(searchTerm.toLowerCase()));
   }, [teamMembers, searchTerm]);
 
@@ -1350,52 +1529,10 @@ const MeetingView: React.FC<{
               type="text"
               placeholder="팀원 이름 검색..."
               value={searchTerm}
-              onChange={(e) => {
-                setSearchTerm(e.target.value);
-                setIsSearchOpen(true);
-              }}
-              onFocus={() => setIsSearchOpen(true)}
+              onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-11 pr-4 py-3 bg-white border border-gray-100 rounded-2xl shadow-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-medium text-sm"
             />
           </div>
-
-          <AnimatePresence>
-            {isSearchOpen && searchTerm.trim() && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 10 }}
-                className="absolute z-50 w-full mt-2 bg-white border border-gray-100 rounded-2xl shadow-xl overflow-hidden max-h-80 overflow-y-auto"
-              >
-                {filteredMembers.length > 0 ? (
-                  <div className="divide-y divide-gray-50">
-                    {filteredMembers.map(member => (
-                      <button
-                        key={member.uid}
-                        onClick={() => {
-                          setSelectedMember(member);
-                          setSearchTerm('');
-                          setIsSearchOpen(false);
-                          setActiveSubTab('comments');
-                        }}
-                        className="w-full p-3 flex items-center gap-3 hover:bg-gray-50 transition-colors text-left"
-                      >
-                        <img src={member.photoURL || `https://ui-avatars.com/api/?name=${member.name}`} className="w-10 h-10 rounded-xl object-cover" alt="" />
-                        <div>
-                          <p className="font-bold text-gray-900 text-sm">{member.name}</p>
-                          <p className="text-[10px] text-gray-400 font-medium">{member.position}</p>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="p-8 text-center">
-                    <p className="text-sm text-gray-400 font-medium">검색 결과가 없습니다.</p>
-                  </div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
         </div>
       </header>
 
@@ -1738,12 +1875,83 @@ const MeetingView: React.FC<{
               </AnimatePresence>
             </div>
           ) : (
-            <div className="h-full flex flex-col items-center justify-center bg-gray-50 rounded-[2.5rem] border border-dashed border-gray-200 p-24 text-center">
-              <div className="w-24 h-24 bg-white rounded-[2rem] shadow-sm flex items-center justify-center mb-8">
-                <Search size={48} className="text-gray-200" />
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h3 className="text-2xl font-black text-gray-900">팀원 목록</h3>
+                <span className="text-sm font-bold text-gray-400">총 {filteredMembers.length}명</span>
               </div>
-              <h3 className="text-2xl font-bold text-gray-900 mb-3">팀원을 검색해주세요</h3>
-              <p className="text-gray-500 max-w-xs mx-auto">상단 검색창에서 면담 의견을 작성할 팀원의 이름을 검색하여 선택하세요.</p>
+              
+              <div className="space-y-3">
+                {filteredMembers.map(member => {
+                  const stats = getMemberStats(member.uid);
+                  const memberGoal = myGoals.find(g => g.userId === member.uid && g.year === new Date().getFullYear());
+                  const hasPendingGoal = memberGoal?.status === 'pending';
+                  
+                  return (
+                    <button
+                      key={member.uid}
+                      onClick={() => setSelectedMember(member)}
+                      className="w-full bg-white p-5 rounded-[1.5rem] border border-gray-100 shadow-sm hover:shadow-lg hover:scale-[1.01] transition-all duration-300 text-left group flex items-center gap-6"
+                    >
+                      <div className="relative shrink-0">
+                        <img 
+                          src={member.photoURL || `https://ui-avatars.com/api/?name=${member.name}`} 
+                          className="w-14 h-14 rounded-2xl object-cover shadow-md group-hover:shadow-blue-100 transition-all" 
+                          alt="" 
+                        />
+                        {hasPendingGoal && (
+                          <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 border-2 border-white rounded-full animate-pulse" title="합의 대기중인 목표가 있습니다" />
+                        )}
+                      </div>
+                      
+                      <div className="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-4 gap-4 items-center">
+                        <div className="md:col-span-1">
+                          <h4 className="text-lg font-bold text-gray-900 group-hover:text-blue-600 transition-colors truncate">{member.name}</h4>
+                          <p className="text-xs font-medium text-gray-400 truncate">{member.position}</p>
+                        </div>
+
+                        <div className="md:col-span-2 space-y-2">
+                          <div className="flex justify-between items-end">
+                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">평균 달성률</p>
+                            <p className="text-sm font-black text-gray-900">{stats.avg}%</p>
+                          </div>
+                          <div className="w-full h-2 bg-gray-50 rounded-full overflow-hidden border border-gray-100">
+                            <motion.div 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${stats.avg}%` }}
+                              className={`h-full transition-all ${
+                                stats.avg >= 80 ? 'bg-emerald-500' : 
+                                stats.avg >= 50 ? 'bg-blue-500' : 
+                                'bg-amber-500'
+                              }`}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="md:col-span-1 flex items-center justify-end gap-4">
+                          <div className="text-right">
+                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-0.5">기록</p>
+                            <p className="text-sm font-black text-gray-900">{stats.count}건</p>
+                          </div>
+                          <div className="w-8 h-8 rounded-full bg-gray-50 flex items-center justify-center text-gray-300 group-hover:bg-blue-50 group-hover:text-blue-500 transition-all">
+                            <ChevronRight size={18} />
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {teamMembers.length === 0 && (
+                <div className="h-full flex flex-col items-center justify-center bg-gray-50 rounded-[2.5rem] border border-dashed border-gray-200 p-24 text-center">
+                  <div className="w-24 h-24 bg-white rounded-[2rem] shadow-sm flex items-center justify-center mb-8">
+                    <Users size={48} className="text-gray-200" />
+                  </div>
+                  <h3 className="text-2xl font-bold text-gray-900 mb-3">관리할 팀원이 없습니다</h3>
+                  <p className="text-gray-500 max-w-xs mx-auto">현재 소속된 팀에 팀원이 존재하지 않거나 정보를 불러올 수 없습니다.</p>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -2482,7 +2690,7 @@ const GoalsView: React.FC<{
   const achievementData = useMemo(() => {
     if (!currentGoal) return null;
     
-    const myEvents = events.filter(e => e.userId === viewingUserId);
+    const myEvents = events.filter(e => e.userId === viewingUserId && (viewingUser.role !== 'member' || e.status === 'reviewed'));
 
     const categoryStats = {
       achievement: { current: 0, total: 0 },
@@ -2871,7 +3079,7 @@ const GoalsView: React.FC<{
 
                         const weight = ci.weight || 0;
                         const category = ci.category || 'achievement';
-                        const indEvents = events.filter(e => e.userId === viewingUserId && e.indicatorId === ci.indicatorId);
+                        const indEvents = events.filter(e => e.userId === viewingUserId && e.indicatorId === ci.indicatorId && (viewingUser.role !== 'member' || e.status === 'reviewed'));
                         const indAchievement = Math.min(100, indEvents.reduce((sum, e) => sum + e.achievement, 0));
                         
                         return (
@@ -2959,6 +3167,460 @@ const GoalsView: React.FC<{
   );
 };
 
+const TeamRecordsView: React.FC<{
+  profile: UserProfile;
+  events: PerformanceEvent[];
+  indicators: GoalIndicator[];
+  users: UserProfile[];
+  departments: Department[];
+  teamGoals: TeamGoal[];
+  isMockMode: boolean;
+  setEvents: React.Dispatch<React.SetStateAction<PerformanceEvent[]>>;
+}> = ({ profile, events, indicators, users, departments, teamGoals, isMockMode, setEvents }) => {
+  const [viewMode, setViewMode] = useState<'indicator' | 'member'>('indicator');
+  const [selectedIndicatorId, setSelectedIndicatorId] = useState<string>('');
+  const [selectedMemberId, setSelectedMemberId] = useState<string>('');
+  const [viewingEventId, setViewingEventId] = useState<string | null>(null);
+  const [commentText, setCommentText] = useState('');
+
+  const userDeptId = profile.workGroupId || profile.teamId;
+
+  const teamIndicators = useMemo(() => {
+    if (!userDeptId) return [];
+    const currentYear = new Date().getFullYear();
+    const teamGoal = teamGoals.find(g => g.departmentId === userDeptId && g.year === currentYear);
+    return teamGoal?.customIndicators || [];
+  }, [userDeptId, teamGoals]);
+
+  const teamMembers = useMemo(() => {
+    if (!userDeptId) return [];
+    return users.filter(u => (profile.workGroupId ? u.workGroupId === userDeptId : u.teamId === userDeptId));
+  }, [userDeptId, users, profile.workGroupId]);
+
+  const teamMemberIds = useMemo(() => teamMembers.map(u => u.uid), [teamMembers]);
+
+  const filteredEvents = useMemo(() => {
+    if (viewMode === 'indicator') {
+      if (!selectedIndicatorId) return [];
+      return events.filter(e => e.indicatorId === selectedIndicatorId && teamMemberIds.includes(e.userId))
+        .sort((a, b) => b.date.localeCompare(a.date));
+    } else {
+      if (!selectedMemberId) return [];
+      return events.filter(e => e.userId === selectedMemberId)
+        .sort((a, b) => b.date.localeCompare(a.date));
+    }
+  }, [viewMode, selectedIndicatorId, selectedMemberId, events, teamMemberIds]);
+
+  const stats = useMemo(() => {
+    if (filteredEvents.length === 0) return { avg: 0, count: 0, reviewed: 0 };
+    const reviewedEvents = filteredEvents.filter(e => e.status === 'reviewed');
+    const sum = reviewedEvents.reduce((acc, curr) => acc + curr.achievement, 0);
+    const reviewed = reviewedEvents.length;
+    return {
+      avg: reviewed > 0 ? Math.round(sum / reviewed) : 0,
+      count: filteredEvents.length,
+      reviewed
+    };
+  }, [filteredEvents]);
+
+  const handleApprove = async (eventId: string) => {
+    if (isMockMode) {
+      const newEvents = events.map(e => e.id === eventId ? { ...e, status: 'reviewed' as EventStatus } : e);
+      setEvents(newEvents);
+      mockDb.setEvents(newEvents);
+      return;
+    }
+
+    if (!db) return;
+    try {
+      await updateDoc(doc(db, 'performanceEvents', eventId), { status: 'reviewed' });
+    } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'performanceEvents'); }
+  };
+
+  const handleAddComment = async () => {
+    if (!commentText.trim() || !viewingEventId) return;
+    
+    const event = events.find(e => e.id === viewingEventId);
+    if (!event) return;
+
+    const newComment: EventComment = {
+      id: `comment-${Date.now()}`,
+      userId: profile.uid,
+      userName: profile.name,
+      userRole: profile.role,
+      content: commentText,
+      createdAt: new Date().toISOString()
+    };
+
+    const updatedEvent: PerformanceEvent = {
+      ...event,
+      comments: [...(event.comments || []), newComment]
+    };
+
+    if (isMockMode) {
+      const newEvents = events.map(e => e.id === viewingEventId ? updatedEvent : e);
+      setEvents(newEvents);
+      mockDb.setEvents(newEvents);
+      setCommentText('');
+      return;
+    }
+
+    if (!db) return;
+    try {
+      await setDoc(doc(db, 'performanceEvents', updatedEvent.id), updatedEvent);
+      setCommentText('');
+    } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'performanceEvents'); }
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-8">
+      <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-3xl font-black text-gray-900 tracking-tight">팀 기록실</h2>
+          <p className="text-gray-500 mt-1 font-medium">팀원들의 성과 기록을 지표별 또는 팀원별로 조회합니다.</p>
+        </div>
+        <div className="flex gap-2 p-1 bg-gray-100 rounded-2xl w-fit">
+          <button
+            onClick={() => {
+              setViewMode('indicator');
+              setSelectedMemberId('');
+            }}
+            className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all ${
+              viewMode === 'indicator' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            지표별 조회
+          </button>
+          <button
+            onClick={() => {
+              setViewMode('member');
+              setSelectedIndicatorId('');
+            }}
+            className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all ${
+              viewMode === 'member' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            팀원별 조회
+          </button>
+        </div>
+      </header>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
+        <div className="lg:col-span-1 space-y-4">
+          <div className="bg-white p-6 rounded-[2rem] border border-gray-100 shadow-sm">
+            <h3 className="text-sm font-bold text-gray-900 mb-4 flex items-center gap-2">
+              {viewMode === 'indicator' ? <Target size={18} className="text-blue-500" /> : <Users size={18} className="text-blue-500" />}
+              {viewMode === 'indicator' ? '핵심지표 선택' : '팀원 선택'}
+            </h3>
+            <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-2 custom-scrollbar">
+              {viewMode === 'indicator' ? (
+                teamIndicators.map(ti => {
+                  const ind = indicators.find(i => i.id === ti.indicatorId);
+                  return (
+                    <button
+                      key={ti.indicatorId}
+                      onClick={() => setSelectedIndicatorId(ti.indicatorId)}
+                      className={`w-full text-left p-4 rounded-2xl transition-all border ${
+                        selectedIndicatorId === ti.indicatorId
+                          ? 'bg-blue-50 border-blue-100 text-blue-700'
+                          : 'bg-white border-transparent text-gray-600 hover:bg-gray-50'
+                      }`}
+                    >
+                      <p className="text-sm font-bold truncate">{ti.name || ind?.name}</p>
+                      <p className="text-[10px] font-medium opacity-60 mt-1">{ti.category === 'achievement' ? '업적' : ti.category === 'job' ? '직무' : '역량'} • {ti.weight}%</p>
+                    </button>
+                  );
+                })
+              ) : (
+                teamMembers.map(member => (
+                  <button
+                    key={member.uid}
+                    onClick={() => setSelectedMemberId(member.uid)}
+                    className={`w-full text-left p-3 rounded-2xl transition-all border flex items-center gap-3 ${
+                      selectedMemberId === member.uid
+                        ? 'bg-blue-50 border-blue-100 text-blue-700'
+                        : 'bg-white border-transparent text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    <img src={member.photoURL || `https://ui-avatars.com/api/?name=${member.name}`} className="w-10 h-10 rounded-xl object-cover" alt="" />
+                    <div>
+                      <p className="text-sm font-bold">{member.name}</p>
+                      <p className="text-[10px] font-medium opacity-60">{member.position}</p>
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="lg:col-span-3 space-y-6">
+          {(selectedIndicatorId || selectedMemberId) && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-white p-6 rounded-[2rem] border border-gray-100 shadow-sm">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">평균 달성률</p>
+                <div className="flex items-end gap-2">
+                  <span className="text-3xl font-black text-gray-900">{stats.avg}%</span>
+                  <div className="flex-1 h-2 bg-gray-100 rounded-full mb-2 overflow-hidden">
+                    <motion.div 
+                      initial={{ width: 0 }}
+                      animate={{ width: `${stats.avg}%` }}
+                      className="h-full bg-blue-600"
+                    />
+                  </div>
+                </div>
+              </div>
+              <div className="bg-white p-6 rounded-[2rem] border border-gray-100 shadow-sm">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">총 기록 건수</p>
+                <div className="flex items-center gap-3">
+                  <span className="text-3xl font-black text-gray-900">{stats.count}</span>
+                  <span className="text-xs font-bold text-gray-400">건의 활동</span>
+                </div>
+              </div>
+              <div className="bg-white p-6 rounded-[2rem] border border-gray-100 shadow-sm">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">검토 완료</p>
+                <div className="flex items-center gap-3">
+                  <span className="text-3xl font-black text-emerald-600">{stats.reviewed}</span>
+                  <span className="text-xs font-bold text-gray-400">/ {stats.count} 건 완료</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-white p-8 rounded-[2rem] border border-gray-100 shadow-sm min-h-[60vh]">
+            <div className="flex items-center justify-between mb-8">
+              <h3 className="text-xl font-bold text-gray-900">
+                {viewMode === 'indicator' 
+                  ? (teamIndicators.find(ti => ti.indicatorId === selectedIndicatorId)?.name || '지표를 선택해주세요')
+                  : (teamMembers.find(m => m.uid === selectedMemberId)?.name || '팀원을 선택해주세요')
+                }
+                <span className="ml-2 text-sm font-medium text-gray-400">기록 ({filteredEvents.length})</span>
+              </h3>
+            </div>
+
+            {filteredEvents.length > 0 ? (
+              <div className="space-y-4">
+                {filteredEvents.map(event => {
+                  const member = users.find(u => u.uid === event.userId);
+                  const ind = indicators.find(i => i.id === event.indicatorId);
+                  return (
+                    <div key={event.id} className="p-6 bg-gray-50 rounded-3xl border border-gray-100 group hover:bg-white hover:shadow-xl hover:scale-[1.01] transition-all duration-300">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex gap-4">
+                          {viewMode === 'indicator' && (
+                            <img src={member?.photoURL || `https://ui-avatars.com/api/?name=${member?.name}`} className="w-12 h-12 rounded-2xl object-cover shadow-md" alt="" />
+                          )}
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{new Date(event.date).toLocaleDateString()}</span>
+                              {viewMode === 'indicator' && <span className="text-xs font-bold text-gray-900">{member?.name}</span>}
+                              {viewMode === 'member' && <span className="text-xs font-bold text-blue-600">{ind?.name}</span>}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                event.progressStatus === 'plan' ? 'bg-gray-100 text-gray-600' :
+                                event.progressStatus === 'in-progress' ? 'bg-blue-50 text-blue-600' :
+                                'bg-emerald-50 text-emerald-600'
+                              }`}>
+                                {event.progressStatus === 'plan' ? '계획' : event.progressStatus === 'in-progress' ? '진행' : '완료'}
+                              </span>
+                              <h4 className="text-lg font-bold text-gray-900 leading-tight">{event.title}</h4>
+                            </div>
+                            {event.description && (
+                              <p className="text-sm text-gray-500 mt-1 line-clamp-3">{event.description}</p>
+                            )}
+                            <button 
+                              onClick={() => setViewingEventId(event.id)}
+                              className="text-[10px] font-bold text-blue-600 hover:underline mt-2 flex items-center gap-1"
+                            >
+                              <MessageSquare size={12} />
+                              상세보기 및 의견 작성
+                            </button>
+                          </div>
+                        </div>
+                        <div className="text-right flex flex-col items-end gap-2">
+                          <div className="text-2xl font-black text-gray-900">{event.achievement}%</div>
+                          <div className="flex items-center gap-2">
+                            <div className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-md inline-block ${
+                              event.status === 'reviewed' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'
+                            }`}>
+                              {event.status === 'reviewed' ? '승인됨' : '등록됨'}
+                            </div>
+                            {event.status === 'registered' && (profile.role === 'leader' || profile.role === 'admin') && (
+                              <button 
+                                onClick={() => handleApprove(event.id)}
+                                className="text-[10px] font-bold text-white bg-gray-900 px-2 py-0.5 rounded-md hover:bg-gray-800 transition-colors"
+                              >
+                                승인하기
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-20 text-gray-300">
+                <FileText size={64} strokeWidth={1} className="mb-4 opacity-20" />
+                <p className="text-sm font-medium">조회된 기록이 없습니다.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Details Modal */}
+      <AnimatePresence>
+        {viewingEventId && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-[2rem] shadow-2xl max-w-2xl w-full p-8 space-y-8 max-h-[90vh] overflow-y-auto"
+            >
+              {(() => {
+                const event = events.find(e => e.id === viewingEventId);
+                if (!event) return null;
+                const indicator = indicators.find(i => i.id === event.indicatorId);
+                const member = users.find(u => u.uid === event.userId);
+                
+                return (
+                  <>
+                    <div className="flex justify-between items-start">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            event.progressStatus === 'plan' ? 'bg-gray-100 text-gray-600' :
+                            event.progressStatus === 'in-progress' ? 'bg-blue-50 text-blue-600' :
+                            'bg-emerald-50 text-emerald-600'
+                          }`}>
+                            {event.progressStatus === 'plan' ? '계획' : event.progressStatus === 'in-progress' ? '진행' : '완료'}
+                          </span>
+                          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{format(parseISO(event.date), 'yyyy.MM.dd')}</span>
+                        </div>
+                        <h3 className="text-2xl font-black text-gray-900">{event.title}</h3>
+                        <div className="flex items-center gap-2">
+                          <img src={member?.photoURL || `https://ui-avatars.com/api/?name=${member?.name}`} className="w-5 h-5 rounded-full" alt="" />
+                          <p className="text-sm text-gray-500 font-medium">{member?.name} • {indicator?.name || '일반 활동'}</p>
+                        </div>
+                      </div>
+                      <button onClick={() => setViewingEventId(null)} className="p-2 text-gray-300 hover:text-gray-500 transition-colors">
+                        <X size={24} />
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="md:col-span-2 space-y-8">
+                        {/* Description */}
+                        <div className="space-y-2">
+                          <h4 className="text-xs font-bold text-gray-400 uppercase tracking-widest">상세 내용</h4>
+                          <div className="bg-gray-50 p-6 rounded-2xl border border-gray-100 text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
+                            {event.description || '내용이 없습니다.'}
+                          </div>
+                        </div>
+
+                        {/* Comments Section */}
+                        <div className="space-y-4">
+                          <h4 className="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                            <MessageSquare size={14} />
+                            의견 및 피드백
+                          </h4>
+                          <div className="space-y-4">
+                            {event.comments?.map(comment => (
+                              <div key={comment.id} className="flex gap-3">
+                                <div className={`w-8 h-8 rounded-lg shrink-0 flex items-center justify-center text-[10px] font-bold ${
+                                  comment.userRole === 'leader' ? 'bg-blue-600 text-white' : 'bg-gray-900 text-white'
+                                }`}>
+                                  {comment.userName.charAt(0)}
+                                </div>
+                                <div className="flex-1 space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-bold text-gray-900">{comment.userName}</span>
+                                    <span className="text-[9px] font-bold text-gray-400">{format(parseISO(comment.createdAt), 'MM.dd HH:mm')}</span>
+                                  </div>
+                                  <div className="bg-gray-50 p-3 rounded-2xl rounded-tl-none text-xs text-gray-700">
+                                    {comment.content}
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                            {(!event.comments || event.comments.length === 0) && (
+                              <p className="text-xs text-gray-400 text-center py-4">등록된 의견이 없습니다.</p>
+                            )}
+                          </div>
+                          
+                          <div className="flex gap-2 pt-2">
+                            <input 
+                              value={commentText}
+                              onChange={(e) => setCommentText(e.target.value)}
+                              placeholder="의견을 입력하세요..."
+                              className="flex-1 bg-gray-50 border border-gray-100 rounded-xl px-4 py-2 text-xs outline-none focus:ring-2 focus:ring-gray-900"
+                              onKeyDown={(e) => e.key === 'Enter' && handleAddComment()}
+                            />
+                            <button 
+                              onClick={handleAddComment}
+                              disabled={!commentText.trim()}
+                              className="px-4 py-2 bg-gray-900 text-white rounded-xl text-xs font-bold disabled:opacity-50"
+                            >
+                              등록
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-8">
+                        {/* Achievement */}
+                        <div className="bg-gray-900 p-6 rounded-2xl text-white">
+                          <p className="text-[10px] font-bold opacity-50 uppercase tracking-widest mb-1">달성률</p>
+                          <p className="text-3xl font-black">{event.achievement}%</p>
+                          <div className="w-full h-1.5 bg-white/10 rounded-full mt-3 overflow-hidden">
+                            <div className="h-full bg-blue-400" style={{ width: `${event.achievement}%` }} />
+                          </div>
+                        </div>
+
+                        {/* History Section */}
+                        <div className="space-y-4">
+                          <h4 className="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                            <Clock size={14} />
+                            변경 이력
+                          </h4>
+                          <div className="space-y-4 relative before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-px before:bg-gray-100">
+                            {event.history?.slice().reverse().map(hist => (
+                              <div key={hist.id} className="relative pl-7">
+                                <div className="absolute left-0 top-1.5 w-6 h-6 rounded-full bg-white border-2 border-gray-100 flex items-center justify-center z-10">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+                                </div>
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] font-bold text-gray-900">{hist.action}</span>
+                                    <span className="text-[9px] font-bold text-gray-400">{format(parseISO(hist.date), 'MM.dd HH:mm')}</span>
+                                  </div>
+                                  {hist.changes && hist.changes.map((change, idx) => (
+                                    <div key={idx} className="text-[9px] text-gray-500 leading-tight">
+                                      <span className="font-bold">{change.field}</span>: {String(change.oldValue)} → {String(change.newValue)}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+};
+
 const EventsView: React.FC<{ 
   profile: UserProfile; 
   events: PerformanceEvent[]; 
@@ -2972,53 +3634,20 @@ const EventsView: React.FC<{
 }> = ({ profile, events, indicators, users, departments, teamGoals, myGoals, isMockMode, setEvents }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [title, setTitle] = useState('');
-  const [selectedTeamId, setSelectedTeamId] = useState('');
-  const [selectedWorkGroupId, setSelectedWorkGroupId] = useState('');
+  const [selectedTeamId, setSelectedTeamId] = useState(profile.teamId || '');
+  const [selectedWorkGroupId, setSelectedWorkGroupId] = useState(profile.workGroupId || '');
   const [selectedCategory, setSelectedCategory] = useState<GoalCategory | ''>('');
   const [indicatorId, setIndicatorId] = useState('');
   const [achievement, setAchievement] = useState(100);
-  const [activeTab, setActiveTab] = useState<'my' | 'team'>('my');
-  const [selectedIndicatorId, setSelectedIndicatorId] = useState<string>('');
+  const [description, setDescription] = useState('');
+  const [progressStatus, setProgressStatus] = useState<ProgressStatus>('completed');
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [viewingEventId, setViewingEventId] = useState<string | null>(null);
+  const [commentText, setCommentText] = useState('');
   
   const myEvents = events.filter(e => e.userId === profile.uid).sort((a, b) => b.date.localeCompare(a.date));
 
   const userDeptId = profile.workGroupId || profile.teamId;
-
-  const teamIndicators = useMemo(() => {
-    if (!userDeptId) return [];
-    const currentYear = new Date().getFullYear();
-    const teamGoal = teamGoals.find(g => g.departmentId === userDeptId && g.year === currentYear);
-    return teamGoal?.customIndicators || [];
-  }, [userDeptId, teamGoals]);
-
-  const teamMemberIds = useMemo(() => {
-    if (!userDeptId) return [];
-    return users
-      .filter(u => (profile.workGroupId ? u.workGroupId === userDeptId : u.teamId === userDeptId))
-      .map(u => u.uid);
-  }, [userDeptId, users, profile.workGroupId]);
-
-  const filteredTeamEvents = useMemo(() => {
-    if (!selectedIndicatorId) return [];
-    return events.filter(e => e.indicatorId === selectedIndicatorId && teamMemberIds.includes(e.userId))
-      .sort((a, b) => b.date.localeCompare(a.date));
-  }, [selectedIndicatorId, events, teamMemberIds]);
-
-  // Reset dependent selections
-  useEffect(() => {
-    setSelectedWorkGroupId('');
-    setSelectedCategory('');
-    setIndicatorId('');
-  }, [selectedTeamId]);
-
-  useEffect(() => {
-    setSelectedCategory('');
-    setIndicatorId('');
-  }, [selectedWorkGroupId]);
-
-  useEffect(() => {
-    setIndicatorId('');
-  }, [selectedCategory]);
 
   const teams = useMemo(() => departments.filter(d => d.type === 'Team'), [departments]);
   const workGroups = useMemo(() => 
@@ -3067,41 +3696,161 @@ const EventsView: React.FC<{
 
   const handleAddEvent = async () => {
     if (!title) return;
+    
+    const now = new Date().toISOString();
+    
+    if (editingEventId) {
+      const existingEvent = events.find(e => e.id === editingEventId);
+      if (!existingEvent) return;
+
+      const changes: any[] = [];
+      if (existingEvent.title !== title) changes.push({ field: '제목', oldValue: existingEvent.title, newValue: title });
+      if (existingEvent.description !== description) changes.push({ field: '상세 내용', oldValue: existingEvent.description, newValue: description });
+      if (existingEvent.progressStatus !== progressStatus) changes.push({ field: '진행 상태', oldValue: existingEvent.progressStatus, newValue: progressStatus });
+      if (existingEvent.achievement !== achievement) changes.push({ field: '달성률', oldValue: existingEvent.achievement, newValue: achievement });
+      if (existingEvent.indicatorId !== indicatorId) changes.push({ field: '지표', oldValue: existingEvent.indicatorId, newValue: indicatorId });
+      if (existingEvent.category !== selectedCategory) changes.push({ field: '영역', oldValue: existingEvent.category, newValue: selectedCategory });
+
+      const historyEntry: EventHistory = {
+        id: `hist-${Date.now()}`,
+        date: now,
+        userId: profile.uid,
+        action: '수정됨',
+        changes: changes.length > 0 ? changes : undefined
+      };
+
+      const updatedEvent: PerformanceEvent = {
+        ...existingEvent,
+        title,
+        description,
+        progressStatus,
+        achievement: selectedCategory ? achievement : 100,
+        indicatorId: indicatorId || undefined,
+        category: selectedCategory || undefined,
+        teamId: selectedTeamId || profile.teamId,
+        workGroupId: selectedWorkGroupId || profile.workGroupId,
+        history: [...(existingEvent.history || []), historyEntry]
+      };
+
+      if (isMockMode) {
+        const newEvents = events.map(e => e.id === editingEventId ? updatedEvent : e);
+        setEvents(newEvents);
+        mockDb.setEvents(newEvents);
+        resetForm();
+        return;
+      }
+
+      if (!db) return;
+      try {
+        await setDoc(doc(db, 'performanceEvents', updatedEvent.id), updatedEvent);
+        resetForm();
+      } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'performanceEvents'); }
+      return;
+    }
+
     const eventData: PerformanceEvent = {
       id: `event-${Date.now()}`,
       userId: profile.uid,
-      date: new Date().toISOString(),
+      date: now,
       title,
+      description,
       teamId: selectedTeamId || profile.teamId,
+      workGroupId: selectedWorkGroupId || profile.workGroupId,
       indicatorId: indicatorId || undefined,
+      category: selectedCategory || undefined,
       achievement: selectedCategory ? achievement : 100,
-      status: 'registered'
+      status: profile.role === 'member' ? 'registered' : 'reviewed',
+      progressStatus,
+      history: [{
+        id: `hist-${Date.now()}`,
+        date: now,
+        userId: profile.uid,
+        action: '생성됨'
+      }]
     };
 
     if (isMockMode) {
       const newEvents = [...events, eventData];
       setEvents(newEvents);
       mockDb.setEvents(newEvents);
-      setIsAdding(false);
-      setTitle('');
-      setSelectedTeamId('');
-      setSelectedWorkGroupId('');
-      setSelectedCategory('');
-      setIndicatorId('');
-      setAchievement(100);
+      resetForm();
       return;
     }
 
     if (!db) return;
     try {
       await setDoc(doc(db, 'performanceEvents', eventData.id), eventData);
-      setIsAdding(false);
-      setTitle('');
-      setSelectedTeamId('');
-      setSelectedWorkGroupId('');
+      resetForm();
+    } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'performanceEvents'); }
+  };
+
+  const resetForm = () => {
+    setIsAdding(false);
+    setEditingEventId(null);
+    setTitle('');
+    setDescription('');
+    setSelectedTeamId(profile.teamId || '');
+    setSelectedWorkGroupId(profile.workGroupId || '');
+    setSelectedCategory('');
+    setIndicatorId('');
+    setAchievement(100);
+    setProgressStatus('completed');
+  };
+
+  const handleEditClick = (event: PerformanceEvent) => {
+    setEditingEventId(event.id);
+    setTitle(event.title);
+    setDescription(event.description || '');
+    setSelectedTeamId(event.teamId || '');
+    setSelectedWorkGroupId(event.workGroupId || '');
+    
+    if (event.category) {
+      setSelectedCategory(event.category);
+    } else if (event.indicatorId) {
+      const ind = indicators.find(i => i.id === event.indicatorId);
+      if (ind) setSelectedCategory(ind.category);
+    } else {
       setSelectedCategory('');
-      setIndicatorId('');
-      setAchievement(100);
+    }
+
+    setIndicatorId(event.indicatorId || '');
+    setAchievement(event.achievement);
+    setProgressStatus(event.progressStatus || 'completed');
+    setIsAdding(true);
+  };
+
+  const handleAddComment = async () => {
+    if (!commentText.trim() || !viewingEventId) return;
+    
+    const event = events.find(e => e.id === viewingEventId);
+    if (!event) return;
+
+    const newComment: EventComment = {
+      id: `comment-${Date.now()}`,
+      userId: profile.uid,
+      userName: profile.name,
+      userRole: profile.role,
+      content: commentText,
+      createdAt: new Date().toISOString()
+    };
+
+    const updatedEvent: PerformanceEvent = {
+      ...event,
+      comments: [...(event.comments || []), newComment]
+    };
+
+    if (isMockMode) {
+      const newEvents = events.map(e => e.id === viewingEventId ? updatedEvent : e);
+      setEvents(newEvents);
+      mockDb.setEvents(newEvents);
+      setCommentText('');
+      return;
+    }
+
+    if (!db) return;
+    try {
+      await setDoc(doc(db, 'performanceEvents', updatedEvent.id), updatedEvent);
+      setCommentText('');
     } catch (e) { handleFirestoreError(e, OperationType.WRITE, 'performanceEvents'); }
   };
 
@@ -3123,42 +3872,64 @@ const EventsView: React.FC<{
     <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-8 relative pb-20">
       <header className="flex items-center justify-between mb-8">
         <div className="flex items-center gap-4">
+          <h2 className="text-3xl font-black text-gray-900 tracking-tight">나의 기록실</h2>
         </div>
       </header>
-
-      <div className="flex gap-2 p-1 bg-gray-100 rounded-2xl w-fit mb-8">
-        <button
-          onClick={() => setActiveTab('my')}
-          className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all ${
-            activeTab === 'my' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          나의 기록
-        </button>
-        <button
-          onClick={() => setActiveTab('team')}
-          className={`px-6 py-2.5 rounded-xl text-sm font-bold transition-all ${
-            activeTab === 'team' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          팀 지표별 기록
-        </button>
-      </div>
 
       {isAdding && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-[2rem] shadow-2xl max-w-lg w-full p-8 space-y-6 max-h-[90vh] overflow-y-auto">
-            <h3 className="text-2xl font-bold text-gray-900">나의 기록실</h3>
+            <h3 className="text-2xl font-bold text-gray-900">{editingEventId ? '기록 수정' : '나의 기록실'}</h3>
             <div className="space-y-4">
               <div>
                 <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">이벤트 제목</label>
                 <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="이벤트 제목 (예: 상반기 트레이딩 모듈 출시)" className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-gray-900" />
               </div>
 
+              <div>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">상세 내용 (서술형)</label>
+                <textarea 
+                  value={description} 
+                  onChange={(e) => setDescription(e.target.value)} 
+                  placeholder="활동에 대한 상세 내용을 입력하세요." 
+                  rows={3}
+                  className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-gray-900 resize-none" 
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">진행 상태</label>
+                <div className="flex gap-2">
+                  {(['plan', 'in-progress', 'completed'] as ProgressStatus[]).map(status => (
+                    <button
+                      key={status}
+                      onClick={() => setProgressStatus(status)}
+                      className={`flex-1 py-3 rounded-xl text-xs font-bold border-2 transition-all ${
+                        progressStatus === status 
+                          ? 'bg-gray-900 text-white border-gray-900 shadow-md'
+                          : 'bg-white text-gray-400 border-gray-100 hover:border-gray-200'
+                      }`}
+                    >
+                      {status === 'plan' ? '계획' : status === 'in-progress' ? '진행' : '완료'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">팀 선택</label>
-                  <select value={selectedTeamId} onChange={(e) => setSelectedTeamId(e.target.value)} className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none">
+                  <select 
+                    value={selectedTeamId} 
+                    onChange={(e) => {
+                      setSelectedTeamId(e.target.value);
+                      setSelectedWorkGroupId('');
+                      setSelectedCategory('');
+                      setIndicatorId('');
+                    }} 
+                    disabled={profile.role === 'member'}
+                    className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none disabled:opacity-50"
+                  >
                     <option value="">팀 선택</option>
                     {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
@@ -3167,8 +3938,12 @@ const EventsView: React.FC<{
                   <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">업무그룹 선택 (선택사항)</label>
                   <select 
                     value={selectedWorkGroupId} 
-                    onChange={(e) => setSelectedWorkGroupId(e.target.value)} 
-                    disabled={!selectedTeamId}
+                    onChange={(e) => {
+                      setSelectedWorkGroupId(e.target.value);
+                      setSelectedCategory('');
+                      setIndicatorId('');
+                    }} 
+                    disabled={!selectedTeamId || profile.role === 'member'}
                     className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none disabled:opacity-50"
                   >
                     <option value="">업무그룹 선택</option>
@@ -3183,7 +3958,10 @@ const EventsView: React.FC<{
                   {(['achievement', 'job', 'competency'] as GoalCategory[]).map(cat => (
                     <button
                       key={cat}
-                      onClick={() => setSelectedCategory(cat)}
+                      onClick={() => {
+                        setSelectedCategory(cat);
+                        setIndicatorId('');
+                      }}
                       disabled={!selectedTeamId}
                       className={`flex-1 py-4 rounded-xl text-sm font-bold border-2 transition-all ${
                         selectedCategory === cat 
@@ -3249,139 +4027,242 @@ const EventsView: React.FC<{
                 disabled={!title}
                 className="flex-1 py-4 bg-gray-900 text-white rounded-2xl font-bold disabled:bg-gray-200 disabled:text-gray-400 transition-colors"
               >
-                등록하기
+                {editingEventId ? '수정하기' : '등록하기'}
               </button>
-              <button onClick={() => setIsAdding(false)} className="flex-1 py-4 bg-gray-100 text-gray-600 rounded-2xl font-bold">취소</button>
+              <button onClick={resetForm} className="flex-1 py-4 bg-gray-100 text-gray-600 rounded-2xl font-bold">취소</button>
             </div>
           </div>
         </div>
       )}
 
-      {activeTab === 'my' ? (
-        <div className="bg-white rounded-[2rem] border border-gray-100 shadow-sm overflow-hidden">
-          <table className="w-full text-left">
-            <thead className="bg-gray-50 border-b border-gray-100">
-              <tr>
-                <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">날짜</th>
-                <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">기록 제목</th>
-                <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">관련 지표</th>
-                <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase text-right">달성도</th>
+      <div className="bg-white rounded-[2rem] border border-gray-100 shadow-sm overflow-hidden">
+        <table className="w-full text-left">
+          <thead className="bg-gray-50 border-b border-gray-100">
+            <tr>
+              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">날짜</th>
+              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">기록 제목</th>
+              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">관련 지표</th>
+              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase text-right">달성도</th>
+              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase text-right">관리</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-50">
+            {myEvents.map(event => (
+              <tr key={event.id} className="hover:bg-gray-50 transition-colors group">
+                <td className="px-6 py-4 text-xs font-medium text-gray-500">{format(parseISO(event.date), 'yyyy.MM.dd')}</td>
+                <td className="px-6 py-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        event.progressStatus === 'plan' ? 'bg-gray-100 text-gray-600' :
+                        event.progressStatus === 'in-progress' ? 'bg-blue-50 text-blue-600' :
+                        'bg-emerald-50 text-emerald-600'
+                      }`}>
+                        {event.progressStatus === 'plan' ? '계획' : event.progressStatus === 'in-progress' ? '진행' : '완료'}
+                      </span>
+                      <p className="text-sm font-bold text-gray-900">{event.title}</p>
+                    </div>
+                    {event.description && (
+                      <p className="text-xs text-gray-500 line-clamp-2">{event.description}</p>
+                    )}
+                  </div>
+                </td>
+                <td className="px-6 py-4 text-xs text-gray-500">
+                  {(() => {
+                    if (!event.indicatorId) return '미지정';
+                    const globalInd = indicators.find(i => i.id === event.indicatorId);
+                    if (globalInd) return globalInd.name;
+                    
+                    // Check user's custom indicators
+                    const myGoal = myGoals.find(g => g.userId === profile.uid && g.year === new Date().getFullYear());
+                    const customInd = myGoal?.customIndicators?.find(ci => ci.indicatorId === event.indicatorId);
+                    return customInd?.name || '삭제된 지표';
+                  })()}
+                </td>
+                <td className="px-6 py-4 text-right">
+                  <div className="flex items-center justify-end gap-3">
+                    <span className="text-sm font-bold text-gray-900">{event.achievement}%</span>
+                    <div className="w-20 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-gray-900" style={{ width: `${event.achievement}%` }} />
+                    </div>
+                  </div>
+                </td>
+                <td className="px-6 py-4 text-right">
+                  <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button 
+                      onClick={() => setViewingEventId(event.id)}
+                      className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                      title="상세보기 및 의견"
+                    >
+                      <MessageSquare size={16} />
+                    </button>
+                    <button 
+                      onClick={() => handleEditClick(event)}
+                      className="p-2 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all"
+                      title="수정하기"
+                    >
+                      <Edit2 size={16} />
+                    </button>
+                    <button 
+                      onClick={() => handleDeleteEvent(event.id)}
+                      className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                      title="삭제하기"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </td>
               </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {myEvents.map(event => (
-                <tr key={event.id} className="hover:bg-gray-50 transition-colors">
-                  <td className="px-6 py-4 text-xs font-medium text-gray-500">{format(parseISO(event.date), 'yyyy.MM.dd')}</td>
-                  <td className="px-6 py-4 text-sm font-bold text-gray-900">{event.title}</td>
-                  <td className="px-6 py-4 text-xs text-gray-500">
-                    {(() => {
-                      if (!event.indicatorId) return '미지정';
-                      const globalInd = indicators.find(i => i.id === event.indicatorId);
-                      if (globalInd) return globalInd.name;
-                      
-                      // Check user's custom indicators
-                      const myGoal = myGoals.find(g => g.userId === profile.uid && g.year === new Date().getFullYear());
-                      const customInd = myGoal?.customIndicators?.find(ci => ci.indicatorId === event.indicatorId);
-                      return customInd?.name || '삭제된 지표';
-                    })()}
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <div className="flex items-center justify-end gap-3">
-                      <span className="text-sm font-bold text-gray-900">{event.achievement}%</span>
-                      <div className="w-20 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-gray-900" style={{ width: `${event.achievement}%` }} />
+            ))}
+          </tbody>
+        </table>
+        {myEvents.length === 0 && (
+          <div className="py-20 text-center text-gray-400">등록된 기록이 없습니다.</div>
+        )}
+      </div>
+
+      {/* Details Modal */}
+      <AnimatePresence>
+        {viewingEventId && (
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-white rounded-[2rem] shadow-2xl max-w-2xl w-full p-8 space-y-8 max-h-[90vh] overflow-y-auto"
+            >
+              {(() => {
+                const event = events.find(e => e.id === viewingEventId);
+                if (!event) return null;
+                const indicator = indicators.find(i => i.id === event.indicatorId);
+                
+                return (
+                  <>
+                    <div className="flex justify-between items-start">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            event.progressStatus === 'plan' ? 'bg-gray-100 text-gray-600' :
+                            event.progressStatus === 'in-progress' ? 'bg-blue-50 text-blue-600' :
+                            'bg-emerald-50 text-emerald-600'
+                          }`}>
+                            {event.progressStatus === 'plan' ? '계획' : event.progressStatus === 'in-progress' ? '진행' : '완료'}
+                          </span>
+                          <span className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{format(parseISO(event.date), 'yyyy.MM.dd')}</span>
+                        </div>
+                        <h3 className="text-2xl font-black text-gray-900">{event.title}</h3>
+                        <p className="text-sm text-gray-500 font-medium">{indicator?.name || '일반 활동'}</p>
+                      </div>
+                      <button onClick={() => setViewingEventId(null)} className="p-2 text-gray-300 hover:text-gray-500 transition-colors">
+                        <X size={24} />
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                      <div className="md:col-span-2 space-y-8">
+                        {/* Description */}
+                        <div className="space-y-2">
+                          <h4 className="text-xs font-bold text-gray-400 uppercase tracking-widest">상세 내용</h4>
+                          <div className="bg-gray-50 p-6 rounded-2xl border border-gray-100 text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
+                            {event.description || '내용이 없습니다.'}
+                          </div>
+                        </div>
+
+                        {/* Comments Section */}
+                        <div className="space-y-4">
+                          <h4 className="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                            <MessageSquare size={14} />
+                            의견 및 피드백
+                          </h4>
+                          <div className="space-y-4">
+                            {event.comments?.map(comment => (
+                              <div key={comment.id} className="flex gap-3">
+                                <div className={`w-8 h-8 rounded-lg shrink-0 flex items-center justify-center text-[10px] font-bold ${
+                                  comment.userRole === 'leader' ? 'bg-blue-600 text-white' : 'bg-gray-900 text-white'
+                                }`}>
+                                  {comment.userName.charAt(0)}
+                                </div>
+                                <div className="flex-1 space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-xs font-bold text-gray-900">{comment.userName}</span>
+                                    <span className="text-[9px] font-bold text-gray-400">{format(parseISO(comment.createdAt), 'MM.dd HH:mm')}</span>
+                                  </div>
+                                  <div className="bg-gray-50 p-3 rounded-2xl rounded-tl-none text-xs text-gray-700">
+                                    {comment.content}
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                            {(!event.comments || event.comments.length === 0) && (
+                              <p className="text-xs text-gray-400 text-center py-4">등록된 의견이 없습니다.</p>
+                            )}
+                          </div>
+                          
+                          <div className="flex gap-2 pt-2">
+                            <input 
+                              value={commentText}
+                              onChange={(e) => setCommentText(e.target.value)}
+                              placeholder="의견을 입력하세요..."
+                              className="flex-1 bg-gray-50 border border-gray-100 rounded-xl px-4 py-2 text-xs outline-none focus:ring-2 focus:ring-gray-900"
+                              onKeyDown={(e) => e.key === 'Enter' && handleAddComment()}
+                            />
+                            <button 
+                              onClick={handleAddComment}
+                              disabled={!commentText.trim()}
+                              className="px-4 py-2 bg-gray-900 text-white rounded-xl text-xs font-bold disabled:opacity-50"
+                            >
+                              등록
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-8">
+                        {/* Achievement */}
+                        <div className="bg-gray-900 p-6 rounded-2xl text-white">
+                          <p className="text-[10px] font-bold opacity-50 uppercase tracking-widest mb-1">달성률</p>
+                          <p className="text-3xl font-black">{event.achievement}%</p>
+                          <div className="w-full h-1.5 bg-white/10 rounded-full mt-3 overflow-hidden">
+                            <div className="h-full bg-blue-400" style={{ width: `${event.achievement}%` }} />
+                          </div>
+                        </div>
+
+                        {/* History Section */}
+                        <div className="space-y-4">
+                          <h4 className="text-xs font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                            <Clock size={14} />
+                            변경 이력
+                          </h4>
+                          <div className="space-y-4 relative before:absolute before:left-[11px] before:top-2 before:bottom-2 before:w-px before:bg-gray-100">
+                            {event.history?.slice().reverse().map(hist => (
+                              <div key={hist.id} className="relative pl-7">
+                                <div className="absolute left-0 top-1.5 w-6 h-6 rounded-full bg-white border-2 border-gray-100 flex items-center justify-center z-10">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+                                </div>
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] font-bold text-gray-900">{hist.action}</span>
+                                    <span className="text-[9px] font-bold text-gray-400">{format(parseISO(hist.date), 'MM.dd HH:mm')}</span>
+                                  </div>
+                                  {hist.changes && hist.changes.map((change, idx) => (
+                                    <div key={idx} className="text-[9px] text-gray-500 leading-tight">
+                                      <span className="font-bold">{change.field}</span>: {String(change.oldValue)} → {String(change.newValue)}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {myEvents.length === 0 && (
-            <div className="py-20 text-center text-gray-400">등록된 기록이 없습니다.</div>
-          )}
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-          <div className="lg:col-span-1 space-y-4">
-            <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest px-2">팀 핵심 지표</h3>
-            <div className="space-y-2">
-              {teamIndicators.map(ti => (
-                <button
-                  key={ti.indicatorId}
-                  onClick={() => setSelectedIndicatorId(ti.indicatorId)}
-                  className={`w-full p-4 rounded-2xl text-left transition-all border ${
-                    selectedIndicatorId === ti.indicatorId 
-                      ? 'bg-gray-900 text-white border-gray-900 shadow-lg' 
-                      : 'bg-white text-gray-600 border-gray-100 hover:border-gray-200'
-                  }`}
-                >
-                  <p className="font-bold text-sm">{ti.name || indicators.find(i => i.id === ti.indicatorId)?.name}</p>
-                  <p className={`text-[10px] mt-1 ${selectedIndicatorId === ti.indicatorId ? 'text-gray-400' : 'text-gray-400'}`}>
-                    비중 {ti.weight}%
-                  </p>
-                </button>
-              ))}
-              {teamIndicators.length === 0 && (
-                <div className="p-8 text-center bg-gray-50 rounded-2xl border border-dashed border-gray-200">
-                  <p className="text-xs text-gray-400 font-medium">등록된 팀 지표가 없습니다.</p>
-                </div>
-              )}
-            </div>
+                  </>
+                );
+              })()}
+            </motion.div>
           </div>
-
-          <div className="lg:col-span-3 space-y-6">
-            <div className="bg-white rounded-[2rem] border border-gray-100 shadow-sm overflow-hidden">
-              <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-                <h3 className="text-sm font-bold text-gray-900">
-                  {selectedIndicatorId 
-                    ? (teamIndicators.find(ti => ti.indicatorId === selectedIndicatorId)?.name || indicators.find(i => i.id === selectedIndicatorId)?.name) + ' 기록'
-                    : '지표를 선택해주세요'}
-                </h3>
-                <span className="text-xs font-bold text-gray-400">총 {filteredTeamEvents.length}건</span>
-              </div>
-              <table className="w-full text-left">
-                <thead className="bg-gray-50 border-b border-gray-100">
-                  <tr>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">날짜</th>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">팀원</th>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase">기록 제목</th>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase text-right">달성도</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-50">
-                  {filteredTeamEvents.map(event => {
-                    const member = users.find(u => u.uid === event.userId);
-                    return (
-                      <tr key={event.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="px-6 py-4 text-xs font-medium text-gray-500">{format(parseISO(event.date), 'yyyy.MM.dd')}</td>
-                        <td className="px-6 py-4">
-                          <div className="flex items-center gap-2">
-                            <img src={member?.photoURL || `https://ui-avatars.com/api/?name=${member?.name}`} className="w-6 h-6 rounded-full" alt="" />
-                            <span className="text-xs font-bold text-gray-900">{member?.name}</span>
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 text-sm font-bold text-gray-900">{event.title}</td>
-                        <td className="px-6 py-4 text-right">
-                          <span className="text-sm font-bold text-gray-900">{event.achievement}%</span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              {selectedIndicatorId && filteredTeamEvents.length === 0 && (
-                <div className="py-20 text-center text-gray-400">해당 지표로 등록된 기록이 없습니다.</div>
-              )}
-              {!selectedIndicatorId && (
-                <div className="py-20 text-center text-gray-400">좌측에서 지표를 선택하여 기록을 확인하세요.</div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Floating Action Button */}
+        )}
+      </AnimatePresence>
       <button 
         onClick={() => setIsAdding(true)}
         className="fixed bottom-8 right-8 w-16 h-16 bg-gray-900 text-white rounded-full shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all z-40 group"
